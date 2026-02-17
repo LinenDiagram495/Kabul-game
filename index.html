@@ -1,0 +1,1138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kabul - Online Multiplayer Card Game</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: 'Cormorant Garamond', serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client"
+      }
+    }
+  </script>
+  
+  <script type="module">
+    import React, { useState, useEffect, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
+    import { getDatabase, ref, onValue, set, push, remove, update, get } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
+
+    // ⚠️ REPLACE THIS WITH YOUR OWN FIREBASE CONFIG
+    // Get your config from: https://console.firebase.google.com/
+    const firebaseConfig = {
+      apiKey: "AIzaSyB5NHbbZ65qIDsvjpamuW_eWINFt6GJMIg",
+      authDomain: "kabul-game.firebaseapp.com",
+      projectId: "kabul-game",
+      storageBucket: "kabul-game.firebasestorage.app",
+      messagingSenderId: "149637122991",
+      appId: "1:149637122991:web:ac39e82182781c7bb97d5a",
+      measurementId: "G-SJHS141YX2"
+    };
+
+    const CARD_VALUES = {
+      'A': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
+      'J': 10, 'Q': 10, 'K♥': -1, 'K♦': -1, 'K♠': 10, 'K♣': 10, 'JOKER': 0
+    };
+
+    const SUITS = ['♠', '♥', '♦', '♣'];
+    const RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+
+    const KabulGame = () => {
+      const [gameState, setGameState] = useState('menu');
+      const [playerId, setPlayerId] = useState(null);
+      const [playerName, setPlayerName] = useState('');
+      const [roomCode, setRoomCode] = useState('');
+      const [currentRoom, setCurrentRoom] = useState(null);
+      const [gameData, setGameData] = useState(null);
+      const [selectedCard, setSelectedCard] = useState(null);
+      const [actionMode, setActionMode] = useState(null);
+      const [showMessage, setShowMessage] = useState('');
+      const dbRef = useRef(null);
+
+      useEffect(() => {
+        try {
+          const app = initializeApp(firebaseConfig);
+          const db = getDatabase(app);
+          dbRef.current = db;
+        } catch (error) {
+          console.error("Firebase initialization error:", error);
+          setShowMessage("Firebase configuration error. Please check your config!");
+        }
+      }, []);
+
+      const createDeck = () => {
+        const deck = [];
+        for (const suit of SUITS) {
+          for (const rank of RANKS) {
+            const cardId = rank === 'K' ? \`\${rank}\${suit}\` : \`\${rank}\${suit}\`;
+            const value = rank === 'K' ? (suit === '♥' || suit === '♦' ? -1 : 10) : CARD_VALUES[rank];
+            deck.push({ id: cardId, rank, suit, value, faceUp: false });
+          }
+        }
+        return deck.sort(() => Math.random() - 0.5);
+      };
+
+      const createRoom = async () => {
+        if (!playerName.trim()) return;
+        
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        const roomRef = ref(dbRef.current, \`rooms/\${code}\`);
+        const newPlayerId = push(ref(dbRef.current, 'temp')).key;
+        
+        const deck = createDeck();
+        const initialState = {
+          code,
+          host: newPlayerId,
+          players: {
+            [newPlayerId]: {
+              name: playerName,
+              score: 0,
+              ready: false,
+              cards: []
+            }
+          },
+          gameStarted: false,
+          deck: deck,
+          discardPile: [],
+          currentTurn: null,
+          phase: 'waiting',
+          roundScores: {},
+          kabulCaller: null
+        };
+        
+        await set(roomRef, initialState);
+        setPlayerId(newPlayerId);
+        setRoomCode(code);
+        setCurrentRoom(roomRef);
+        setGameState('lobby');
+        
+        onValue(roomRef, (snapshot) => {
+          const data = snapshot.val();
+          if (data) setGameData(data);
+        });
+      };
+
+      const joinRoom = async () => {
+        if (!playerName.trim() || !roomCode.trim()) return;
+        
+        const roomRef = ref(dbRef.current, \`rooms/\${roomCode.toUpperCase()}\`);
+        const snapshot = await get(roomRef);
+        
+        if (!snapshot.exists()) {
+          setShowMessage('Room not found!');
+          setTimeout(() => setShowMessage(''), 3000);
+          return;
+        }
+        
+        const data = snapshot.val();
+        if (Object.keys(data.players).length >= 6) {
+          setShowMessage('Room is full!');
+          setTimeout(() => setShowMessage(''), 3000);
+          return;
+        }
+        
+        const newPlayerId = push(ref(dbRef.current, 'temp')).key;
+        await update(ref(dbRef.current, \`rooms/\${roomCode.toUpperCase()}/players/\${newPlayerId}\`), {
+          name: playerName,
+          score: 0,
+          ready: false,
+          cards: []
+        });
+        
+        setPlayerId(newPlayerId);
+        setRoomCode(roomCode.toUpperCase());
+        setCurrentRoom(roomRef);
+        setGameState('lobby');
+        
+        onValue(roomRef, (snapshot) => {
+          const data = snapshot.val();
+          if (data) setGameData(data);
+        });
+      };
+
+      const startGame = async () => {
+        if (!gameData || gameData.host !== playerId) return;
+        
+        const playerIds = Object.keys(gameData.players);
+        if (playerIds.length < 2) return;
+        
+        const deck = createDeck();
+        const players = {};
+        
+        playerIds.forEach((pid) => {
+          const playerCards = deck.splice(0, 4).map(card => ({
+            ...card,
+            faceUp: false,
+            position: 'hand'
+          }));
+          players[pid] = {
+            ...gameData.players[pid],
+            cards: playerCards,
+            viewedCards: [2, 3],
+            roundScore: 0
+          };
+        });
+        
+        const firstCard = deck.shift();
+        firstCard.faceUp = true;
+        
+        await update(currentRoom, {
+          gameStarted: true,
+          phase: 'initial_smash',
+          deck: deck,
+          discardPile: [firstCard],
+          players: players,
+          currentTurn: null,
+          kabulCaller: null,
+          roundNumber: (gameData.roundNumber || 0) + 1
+        });
+      };
+
+      const handleInitialSmash = async (cardIndex) => {
+        if (!gameData || gameData.phase !== 'initial_smash') return;
+        
+        const myCards = gameData.players[playerId].cards;
+        const myCard = myCards[cardIndex];
+        const topDiscard = gameData.discardPile[gameData.discardPile.length - 1];
+        
+        if (myCard.rank === topDiscard.rank && myCard.suit === topDiscard.suit) {
+          const updatedCards = [...myCards];
+          updatedCards[cardIndex] = { ...myCard, faceUp: true, position: 'discarded' };
+          
+          const newDiscardPile = [...gameData.discardPile, { ...myCard, faceUp: true }];
+          
+          await update(ref(dbRef.current, \`rooms/\${roomCode}/players/\${playerId}\`), {
+            cards: updatedCards
+          });
+          
+          await update(ref(dbRef.current, \`rooms/\${roomCode}\`), {
+            discardPile: newDiscardPile
+          });
+          
+          setTimeout(async () => {
+            const snapshot = await get(currentRoom);
+            const data = snapshot.val();
+            const playerIds = Object.keys(data.players);
+            const currentPlayerIndex = playerIds.indexOf(playerId);
+            const nextPlayerIndex = (currentPlayerIndex + 1) % playerIds.length;
+            const nextPlayerId = playerIds[nextPlayerIndex];
+            
+            await update(currentRoom, {
+              phase: 'playing',
+              currentTurn: nextPlayerId
+            });
+          }, 1000);
+        }
+      };
+
+      const drawCard = async (source) => {
+        if (!gameData || gameData.currentTurn !== playerId || gameData.phase !== 'playing') return;
+        
+        let drawnCard;
+        let newDeck = [...gameData.deck];
+        let newDiscardPile = [...gameData.discardPile];
+        
+        if (source === 'deck') {
+          if (newDeck.length === 0) {
+            newDeck = newDiscardPile.slice(0, -1).sort(() => Math.random() - 0.5);
+            newDiscardPile = [newDiscardPile[newDiscardPile.length - 1]];
+          }
+          drawnCard = newDeck.shift();
+        } else {
+          drawnCard = newDiscardPile.pop();
+        }
+        
+        setSelectedCard(drawnCard);
+        await update(currentRoom, {
+          deck: newDeck,
+          discardPile: newDiscardPile,
+          drawnCard: drawnCard,
+          phase: 'card_drawn'
+        });
+      };
+
+      const discardDrawnCard = async () => {
+        if (!selectedCard) return;
+        
+        const newDiscardPile = [...gameData.discardPile, { ...selectedCard, faceUp: true }];
+        await endTurn(newDiscardPile);
+      };
+
+      const replaceCard = async (cardIndex) => {
+        if (!selectedCard) return;
+        
+        const myCards = [...gameData.players[playerId].cards];
+        const replacedCard = myCards[cardIndex];
+        
+        myCards[cardIndex] = { ...selectedCard, faceUp: false };
+        
+        const newDiscardPile = [...gameData.discardPile, { ...replacedCard, faceUp: true }];
+        
+        await update(ref(dbRef.current, \`rooms/\${roomCode}/players/\${playerId}\`), {
+          cards: myCards
+        });
+        
+        await endTurn(newDiscardPile);
+      };
+
+      const useCardAction = async () => {
+        if (!selectedCard) return;
+        
+        const rank = selectedCard.rank;
+        const newDiscardPile = [...gameData.discardPile, { ...selectedCard, faceUp: true }];
+        
+        await update(currentRoom, {
+          discardPile: newDiscardPile
+        });
+        
+        if (rank === '7') {
+          setActionMode('peek');
+        } else if (rank === '8') {
+          setActionMode('peekOther');
+        } else if (rank === '9') {
+          setActionMode('swap');
+        } else if (rank === '10') {
+          setActionMode('compare');
+        } else {
+          await endTurn(newDiscardPile);
+        }
+        
+        setSelectedCard(null);
+      };
+
+      const handlePeek = async (cardIndex) => {
+        const card = gameData.players[playerId].cards[cardIndex];
+        setShowMessage(\`This card is: \${card.rank}\${card.suit}\`);
+        setTimeout(() => setShowMessage(''), 3000);
+        setActionMode(null);
+        await endTurn();
+      };
+
+      const endTurn = async (discardPile = null) => {
+        const playerIds = Object.keys(gameData.players);
+        const currentIndex = playerIds.indexOf(playerId);
+        const nextIndex = (currentIndex + 1) % playerIds.length;
+        const nextPlayerId = playerIds[nextIndex];
+        
+        await update(currentRoom, {
+          currentTurn: nextPlayerId,
+          phase: 'playing',
+          drawnCard: null,
+          ...(discardPile && { discardPile })
+        });
+        
+        setSelectedCard(null);
+        setActionMode(null);
+      };
+
+      const callKabul = async () => {
+        if (gameData.currentTurn !== playerId) return;
+        
+        await update(currentRoom, {
+          kabulCaller: playerId,
+          phase: 'final_round'
+        });
+        
+        await endTurn();
+      };
+
+      const calculateScore = (cards) => {
+        return cards
+          .filter(c => c.position === 'hand')
+          .reduce((sum, card) => {
+            if (card.rank === 'K') {
+              return sum + (card.suit === '♥' || card.suit === '♦' ? -1 : 10);
+            }
+            return sum + (CARD_VALUES[card.rank] || 0);
+          }, 0);
+      };
+
+      const renderCard = (card, index, isOwn = true, canClick = false, onClick = null) => {
+        const suitColor = (card.suit === '♥' || card.suit === '♦') ? '#dc2626' : '#1f2937';
+        
+        return React.createElement('div', {
+          key: index,
+          onClick: onClick,
+          style: {
+            width: '80px',
+            height: '112px',
+            borderRadius: '8px',
+            border: '2px solid #d4af37',
+            background: card.faceUp ? '#fff' : 'linear-gradient(135deg, #1e3a5f 0%, #2d5a8c 100%)',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            cursor: canClick ? 'pointer' : 'default',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            transition: 'all 0.3s ease',
+            transform: canClick ? 'translateY(0)' : '',
+            position: 'relative'
+          },
+          onMouseEnter: (e) => canClick && (e.currentTarget.style.transform = 'translateY(-8px)'),
+          onMouseLeave: (e) => canClick && (e.currentTarget.style.transform = 'translateY(0)')
+        },
+          card.faceUp ? [
+            React.createElement('div', {
+              key: 'rank',
+              style: { fontSize: '24px', fontWeight: 'bold', color: suitColor }
+            }, card.rank),
+            React.createElement('div', {
+              key: 'suit',
+              style: { fontSize: '32px', color: suitColor }
+            }, card.suit)
+          ] : React.createElement('div', {
+            style: {
+              width: '100%',
+              height: '100%',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              color: '#d4af37',
+              fontSize: '14px',
+              fontWeight: '600',
+              letterSpacing: '1px'
+            }
+          }, 'KABUL')
+        );
+      };
+
+      // Menu Screen
+      if (gameState === 'menu') {
+        return React.createElement('div', {
+          style: {
+            width: '100vw',
+            height: '100vh',
+            background: 'linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            fontFamily: '"Playfair Display", Georgia, serif'
+          }
+        },
+          React.createElement('div', {
+            style: {
+              background: 'rgba(16, 59, 48, 0.95)',
+              border: '3px solid #d4af37',
+              borderRadius: '20px',
+              padding: '60px 80px',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+              maxWidth: '500px',
+              backdropFilter: 'blur(10px)'
+            }
+          },
+            React.createElement('h1', {
+              style: {
+                fontSize: '64px',
+                color: '#d4af37',
+                textAlign: 'center',
+                marginBottom: '20px',
+                textShadow: '2px 2px 4px rgba(0,0,0,0.5)',
+                letterSpacing: '4px'
+              }
+            }, 'KABUL'),
+            React.createElement('p', {
+              style: {
+                color: '#c9d1d9',
+                textAlign: 'center',
+                marginBottom: '40px',
+                fontSize: '18px',
+                fontFamily: '"Cormorant Garamond", serif',
+                fontStyle: 'italic'
+              }
+            }, 'The Ultimate Card Game'),
+            React.createElement('input', {
+              type: 'text',
+              placeholder: 'Enter your name',
+              value: playerName,
+              onChange: (e) => setPlayerName(e.target.value),
+              style: {
+                width: '100%',
+                padding: '16px',
+                marginBottom: '24px',
+                fontSize: '18px',
+                borderRadius: '12px',
+                border: '2px solid #d4af37',
+                background: 'rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                fontFamily: '"Cormorant Garamond", serif',
+                outline: 'none'
+              }
+            }),
+            React.createElement('button', {
+              onClick: createRoom,
+              style: {
+                width: '100%',
+                padding: '18px',
+                marginBottom: '16px',
+                fontSize: '20px',
+                fontWeight: '600',
+                borderRadius: '12px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #d4af37 0%, #aa8a2a 100%)',
+                color: '#1a1a1a',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontFamily: '"Playfair Display", serif',
+                letterSpacing: '1px',
+                boxShadow: '0 4px 12px rgba(212, 175, 55, 0.4)'
+              },
+              onMouseEnter: (e) => e.currentTarget.style.transform = 'translateY(-2px)',
+              onMouseLeave: (e) => e.currentTarget.style.transform = 'translateY(0)'
+            }, 'Create Room'),
+            React.createElement('div', {
+              style: { position: 'relative', textAlign: 'center', margin: '24px 0' }
+            },
+              React.createElement('div', {
+                style: {
+                  position: 'absolute',
+                  top: '50%',
+                  left: 0,
+                  right: 0,
+                  height: '1px',
+                  background: '#d4af37',
+                  opacity: 0.3
+                }
+              }),
+              React.createElement('span', {
+                style: {
+                  position: 'relative',
+                  background: 'rgba(16, 59, 48, 0.95)',
+                  padding: '0 16px',
+                  color: '#d4af37',
+                  fontSize: '16px'
+                }
+              }, 'or')
+            ),
+            React.createElement('input', {
+              type: 'text',
+              placeholder: 'Enter room code',
+              value: roomCode,
+              onChange: (e) => setRoomCode(e.target.value.toUpperCase()),
+              style: {
+                width: '100%',
+                padding: '16px',
+                marginBottom: '16px',
+                fontSize: '18px',
+                borderRadius: '12px',
+                border: '2px solid #d4af37',
+                background: 'rgba(255, 255, 255, 0.1)',
+                color: '#fff',
+                fontFamily: '"Cormorant Garamond", serif',
+                outline: 'none',
+                textTransform: 'uppercase'
+              }
+            }),
+            React.createElement('button', {
+              onClick: joinRoom,
+              style: {
+                width: '100%',
+                padding: '18px',
+                fontSize: '20px',
+                fontWeight: '600',
+                borderRadius: '12px',
+                border: '2px solid #d4af37',
+                background: 'transparent',
+                color: '#d4af37',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontFamily: '"Playfair Display", serif',
+                letterSpacing: '1px'
+              },
+              onMouseEnter: (e) => {
+                e.currentTarget.style.background = 'rgba(212, 175, 55, 0.1)';
+                e.currentTarget.style.transform = 'translateY(-2px)';
+              },
+              onMouseLeave: (e) => {
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.transform = 'translateY(0)';
+              }
+            }, 'Join Room'),
+            showMessage && React.createElement('div', {
+              style: {
+                marginTop: '20px',
+                padding: '12px',
+                background: 'rgba(220, 38, 38, 0.2)',
+                border: '1px solid #dc2626',
+                borderRadius: '8px',
+                color: '#fca5a5',
+                textAlign: 'center',
+                fontFamily: '"Cormorant Garamond", serif'
+              }
+            }, showMessage)
+          )
+        );
+      }
+
+      // Lobby Screen
+      if (gameState === 'lobby') {
+        const isHost = gameData?.host === playerId;
+        const playerCount = gameData ? Object.keys(gameData.players).length : 0;
+        
+        return React.createElement('div', {
+          style: {
+            width: '100vw',
+            height: '100vh',
+            background: 'linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            fontFamily: '"Playfair Display", Georgia, serif',
+            padding: '40px'
+          }
+        },
+          React.createElement('div', {
+            style: {
+              background: 'rgba(16, 59, 48, 0.95)',
+              border: '3px solid #d4af37',
+              borderRadius: '20px',
+              padding: '50px',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+              maxWidth: '600px',
+              width: '100%'
+            }
+          },
+            React.createElement('div', {
+              style: { textAlign: 'center', marginBottom: '40px' }
+            },
+              React.createElement('h2', {
+                style: {
+                  fontSize: '42px',
+                  color: '#d4af37',
+                  marginBottom: '12px',
+                  letterSpacing: '2px'
+                }
+              }, 'Game Lobby'),
+              React.createElement('div', {
+                style: {
+                  fontSize: '28px',
+                  color: '#fff',
+                  background: 'rgba(212, 175, 55, 0.2)',
+                  padding: '12px 24px',
+                  borderRadius: '12px',
+                  display: 'inline-block',
+                  border: '2px solid #d4af37',
+                  letterSpacing: '4px',
+                  fontWeight: '600'
+                }
+              }, gameData?.code)
+            ),
+            React.createElement('div', {
+              style: { marginBottom: '30px' }
+            },
+              React.createElement('h3', {
+                style: {
+                  color: '#d4af37',
+                  marginBottom: '20px',
+                  fontSize: '24px',
+                  letterSpacing: '1px'
+                }
+              }, \`Players (\${playerCount}/6)\`),
+              React.createElement('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: '12px' }
+              },
+                gameData && Object.entries(gameData.players).map(([pid, player]) =>
+                  React.createElement('div', {
+                    key: pid,
+                    style: {
+                      background: 'rgba(255, 255, 255, 0.1)',
+                      padding: '16px',
+                      borderRadius: '12px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      border: pid === playerId ? '2px solid #d4af37' : '2px solid transparent'
+                    }
+                  },
+                    React.createElement('span', {
+                      style: {
+                        color: '#fff',
+                        fontSize: '20px',
+                        fontFamily: '"Cormorant Garamond", serif'
+                      }
+                    }, \`\${player.name} \${pid === gameData.host ? '👑' : ''}\`),
+                    player.score > 0 && React.createElement('span', {
+                      style: {
+                        color: '#d4af37',
+                        fontSize: '18px',
+                        fontWeight: '600'
+                      }
+                    }, \`Score: \${player.score}\`)
+                  )
+                )
+              )
+            ),
+            isHost && React.createElement('button', {
+              onClick: startGame,
+              disabled: playerCount < 2,
+              style: {
+                width: '100%',
+                padding: '18px',
+                fontSize: '22px',
+                fontWeight: '600',
+                borderRadius: '12px',
+                border: 'none',
+                background: playerCount >= 2 
+                  ? 'linear-gradient(135deg, #d4af37 0%, #aa8a2a 100%)'
+                  : 'rgba(100, 100, 100, 0.3)',
+                color: playerCount >= 2 ? '#1a1a1a' : '#666',
+                cursor: playerCount >= 2 ? 'pointer' : 'not-allowed',
+                transition: 'all 0.3s ease',
+                letterSpacing: '1px',
+                boxShadow: playerCount >= 2 ? '0 4px 12px rgba(212, 175, 55, 0.4)' : 'none'
+              }
+            }, 'Start Game'),
+            !isHost && React.createElement('div', {
+              style: {
+                textAlign: 'center',
+                color: '#c9d1d9',
+                fontSize: '18px',
+                fontFamily: '"Cormorant Garamond", serif',
+                fontStyle: 'italic'
+              }
+            }, 'Waiting for host to start the game...')
+          )
+        );
+      }
+
+      // Game Screen
+      if (gameState === 'game' || (gameData?.gameStarted)) {
+        const myCards = gameData?.players[playerId]?.cards || [];
+        const isMyTurn = gameData?.currentTurn === playerId;
+        const topDiscard = gameData?.discardPile?.[gameData.discardPile.length - 1];
+        
+        return React.createElement('div', {
+          style: {
+            width: '100vw',
+            height: '100vh',
+            background: 'linear-gradient(135deg, #0a3d2e 0%, #103b30 50%, #16614d 100%)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '20px',
+            fontFamily: '"Cormorant Garamond", serif',
+            overflow: 'hidden'
+          }
+        },
+          // Header
+          React.createElement('div', {
+            style: {
+              display: 'flex',
+              justifyContent: 'space-between',
+              width: '100%',
+              maxWidth: '1400px',
+              marginBottom: '20px',
+              color: '#d4af37',
+              fontSize: '20px'
+            }
+          },
+            React.createElement('div', {}, 
+              'Room: ',
+              React.createElement('strong', { style: { letterSpacing: '2px' }}, gameData?.code)
+            ),
+            React.createElement('div', {
+              style: {
+                fontSize: '24px',
+                fontFamily: '"Playfair Display", serif',
+                letterSpacing: '2px'
+              }
+            }, 'KABUL'),
+            React.createElement('div', {},
+              'Round: ',
+              React.createElement('strong', {}, gameData?.roundNumber || 1)
+            )
+          ),
+
+          // Message overlay
+          showMessage && React.createElement('div', {
+            style: {
+              position: 'fixed',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              background: 'rgba(16, 59, 48, 0.98)',
+              border: '3px solid #d4af37',
+              borderRadius: '16px',
+              padding: '30px 50px',
+              fontSize: '28px',
+              color: '#d4af37',
+              zIndex: 1000,
+              boxShadow: '0 10px 40px rgba(0,0,0,0.7)',
+              fontFamily: '"Playfair Display", serif',
+              letterSpacing: '1px'
+            }
+          }, showMessage),
+
+          // Main game area
+          React.createElement('div', {
+            style: {
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              alignItems: 'center',
+              width: '100%',
+              maxWidth: '1400px',
+              position: 'relative'
+            }
+          },
+            // Deck and discard area
+            React.createElement('div', {
+              style: {
+                display: 'flex',
+                gap: '40px',
+                marginBottom: '60px',
+                alignItems: 'center'
+              }
+            },
+              // Deck
+              React.createElement('div', {
+                onClick: () => isMyTurn && gameData.phase === 'playing' && drawCard('deck'),
+                style: {
+                  width: '100px',
+                  height: '140px',
+                  borderRadius: '12px',
+                  border: '3px solid #d4af37',
+                  background: 'linear-gradient(135deg, #1e3a5f 0%, #2d5a8c 100%)',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  cursor: isMyTurn && gameData.phase === 'playing' ? 'pointer' : 'default',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                  transition: 'all 0.3s ease',
+                  position: 'relative'
+                },
+                onMouseEnter: (e) => isMyTurn && gameData.phase === 'playing' && (e.currentTarget.style.transform = 'translateY(-8px)'),
+                onMouseLeave: (e) => isMyTurn && gameData.phase === 'playing' && (e.currentTarget.style.transform = 'translateY(0)')
+              },
+                React.createElement('div', {
+                  style: {
+                    color: '#d4af37',
+                    fontSize: '16px',
+                    fontWeight: '700',
+                    letterSpacing: '2px',
+                    fontFamily: '"Playfair Display", serif'
+                  }
+                }, 'DECK'),
+                React.createElement('div', {
+                  style: {
+                    position: 'absolute',
+                    bottom: '8px',
+                    fontSize: '14px',
+                    color: '#d4af37'
+                  }
+                }, gameData?.deck?.length || 0)
+              ),
+
+              // Discard pile
+              React.createElement('div', {
+                style: {
+                  width: '100px',
+                  height: '140px',
+                  borderRadius: '12px',
+                  border: '3px solid #d4af37',
+                  background: '#fff',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                  cursor: isMyTurn && gameData.phase === 'playing' ? 'pointer' : 'default',
+                  transition: 'all 0.3s ease'
+                },
+                onClick: () => isMyTurn && gameData.phase === 'playing' && topDiscard && drawCard('discard'),
+                onMouseEnter: (e) => isMyTurn && gameData.phase === 'playing' && (e.currentTarget.style.transform = 'translateY(-8px)'),
+                onMouseLeave: (e) => isMyTurn && gameData.phase === 'playing' && (e.currentTarget.style.transform = 'translateY(0)')
+              },
+                topDiscard && [
+                  React.createElement('div', {
+                    key: 'rank',
+                    style: {
+                      fontSize: '32px',
+                      fontWeight: 'bold',
+                      color: (topDiscard.suit === '♥' || topDiscard.suit === '♦') ? '#dc2626' : '#1f2937'
+                    }
+                  }, topDiscard.rank),
+                  React.createElement('div', {
+                    key: 'suit',
+                    style: {
+                      fontSize: '40px',
+                      color: (topDiscard.suit === '♥' || topDiscard.suit === '♦') ? '#dc2626' : '#1f2937'
+                    }
+                  }, topDiscard.suit)
+                ]
+              ),
+
+              // Turn indicator
+              React.createElement('div', {
+                style: {
+                  padding: '12px 24px',
+                  background: isMyTurn ? 'rgba(212, 175, 55, 0.2)' : 'rgba(255, 255, 255, 0.1)',
+                  border: \`2px solid \${isMyTurn ? '#d4af37' : '#666'}\`,
+                  borderRadius: '12px',
+                  color: isMyTurn ? '#d4af37' : '#999',
+                  fontSize: '18px',
+                  fontWeight: '600',
+                  letterSpacing: '1px',
+                  fontFamily: '"Playfair Display", serif'
+                }
+              }, isMyTurn ? "YOUR TURN" : "WAITING")
+            ),
+
+            // Card action modal
+            selectedCard && gameData.phase === 'card_drawn' && React.createElement('div', {
+              style: {
+                position: 'fixed',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                background: 'rgba(16, 59, 48, 0.98)',
+                border: '3px solid #d4af37',
+                borderRadius: '20px',
+                padding: '40px',
+                zIndex: 100,
+                boxShadow: '0 20px 60px rgba(0,0,0,0.7)'
+              }
+            },
+              React.createElement('h3', {
+                style: {
+                  color: '#d4af37',
+                  marginBottom: '24px',
+                  fontSize: '28px',
+                  textAlign: 'center',
+                  fontFamily: '"Playfair Display", serif',
+                  letterSpacing: '1px'
+                }
+              }, \`You Drew: \${selectedCard.rank}\${selectedCard.suit}\`),
+              
+              React.createElement('div', {
+                style: { display: 'flex', gap: '16px', flexDirection: 'column' }
+              },
+                React.createElement('button', {
+                  onClick: discardDrawnCard,
+                  style: {
+                    padding: '16px 32px',
+                    fontSize: '18px',
+                    borderRadius: '12px',
+                    border: '2px solid #d4af37',
+                    background: 'transparent',
+                    color: '#d4af37',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    fontFamily: '"Cormorant Garamond", serif',
+                    fontWeight: '600'
+                  }
+                }, 'Discard'),
+                
+                ['7', '8', '9', '10'].includes(selectedCard.rank) && React.createElement('button', {
+                  onClick: useCardAction,
+                  style: {
+                    padding: '16px 32px',
+                    fontSize: '18px',
+                    borderRadius: '12px',
+                    border: 'none',
+                    background: 'linear-gradient(135deg, #d4af37 0%, #aa8a2a 100%)',
+                    color: '#1a1a1a',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    fontFamily: '"Cormorant Garamond", serif',
+                    fontWeight: '600'
+                  }
+                }, \`Use Action (\${selectedCard.rank})\`),
+                
+                React.createElement('div', {
+                  style: {
+                    color: '#c9d1d9',
+                    fontSize: '16px',
+                    textAlign: 'center',
+                    fontStyle: 'italic',
+                    marginTop: '8px'
+                  }
+                }, 'Or click one of your cards to replace')
+              )
+            ),
+
+            // Player's cards
+            React.createElement('div', {
+              style: {
+                position: 'absolute',
+                bottom: '0',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                background: 'rgba(16, 59, 48, 0.6)',
+                padding: '24px 40px',
+                borderRadius: '20px 20px 0 0',
+                border: '3px solid #d4af37',
+                borderBottom: 'none'
+              }
+            },
+              React.createElement('div', {
+                style: {
+                  color: '#d4af37',
+                  marginBottom: '12px',
+                  textAlign: 'center',
+                  fontSize: '20px',
+                  fontFamily: '"Playfair Display", serif',
+                  letterSpacing: '1px'
+                }
+              }, 'Your Cards'),
+              React.createElement('div', {
+                style: {
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, 1fr)',
+                  gap: '12px'
+                }
+              },
+                myCards.filter(c => c.position === 'hand').map((card, idx) =>
+                  renderCard(
+                    card,
+                    idx,
+                    true,
+                    (selectedCard && gameData.phase === 'card_drawn') || 
+                    actionMode === 'peek' ||
+                    (gameData.phase === 'initial_smash' && card.rank === topDiscard?.rank),
+                    () => {
+                      if (gameData.phase === 'initial_smash' && card.rank === topDiscard?.rank) {
+                        handleInitialSmash(idx);
+                      } else if (selectedCard && gameData.phase === 'card_drawn') {
+                        replaceCard(idx);
+                      } else if (actionMode === 'peek') {
+                        handlePeek(idx);
+                      }
+                    }
+                  )
+                )
+              ),
+              React.createElement('div', {
+                style: {
+                  marginTop: '12px',
+                  textAlign: 'center',
+                  color: '#d4af37',
+                  fontSize: '18px',
+                  fontWeight: '600'
+                }
+              }, \`Current Score: \${calculateScore(myCards)}\`)
+            ),
+
+            // Kabul button
+            isMyTurn && gameData.phase === 'playing' && !gameData.kabulCaller && React.createElement('button', {
+              onClick: callKabul,
+              style: {
+                position: 'absolute',
+                top: '20px',
+                right: '20px',
+                padding: '16px 32px',
+                fontSize: '24px',
+                fontWeight: '700',
+                borderRadius: '16px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)',
+                color: '#fff',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontFamily: '"Playfair Display", serif',
+                letterSpacing: '2px',
+                boxShadow: '0 6px 20px rgba(220, 38, 38, 0.4)',
+                textTransform: 'uppercase'
+              },
+              onMouseEnter: (e) => e.currentTarget.style.transform = 'scale(1.05)',
+              onMouseLeave: (e) => e.currentTarget.style.transform = 'scale(1)'
+            }, 'Call Kabul!'),
+
+            // Kabul called indicator
+            gameData?.kabulCaller && React.createElement('div', {
+              style: {
+                position: 'absolute',
+                top: '20px',
+                right: '20px',
+                padding: '16px 32px',
+                background: 'rgba(220, 38, 38, 0.2)',
+                border: '2px solid #dc2626',
+                borderRadius: '16px',
+                color: '#fca5a5',
+                fontSize: '20px',
+                fontWeight: '600',
+                fontFamily: '"Playfair Display", serif',
+                letterSpacing: '1px'
+              }
+            }, 'Kabul Called! Final Round'),
+
+            // Other players
+            React.createElement('div', {
+              style: {
+                position: 'absolute',
+                top: '20px',
+                left: '20px',
+                background: 'rgba(16, 59, 48, 0.8)',
+                padding: '20px',
+                borderRadius: '16px',
+                border: '2px solid #d4af37',
+                minWidth: '200px'
+              }
+            },
+              React.createElement('div', {
+                style: {
+                  color: '#d4af37',
+                  marginBottom: '12px',
+                  fontSize: '18px',
+                  fontFamily: '"Playfair Display", serif',
+                  letterSpacing: '1px'
+                }
+              }, 'Players'),
+              gameData && Object.entries(gameData.players)
+                .filter(([pid]) => pid !== playerId)
+                .map(([pid, player]) =>
+                  React.createElement('div', {
+                    key: pid,
+                    style: {
+                      marginBottom: '8px',
+                      padding: '8px',
+                      background: gameData.currentTurn === pid ? 'rgba(212, 175, 55, 0.2)' : 'transparent',
+                      borderRadius: '8px',
+                      border: gameData.currentTurn === pid ? '1px solid #d4af37' : '1px solid transparent'
+                    }
+                  },
+                    React.createElement('div', {
+                      style: { color: '#fff', fontSize: '16px' }
+                    }, player.name),
+                    React.createElement('div', {
+                      style: { color: '#d4af37', fontSize: '14px' }
+                    }, \`Cards: \${player.cards?.filter(c => c.position === 'hand').length || 0} | Score: \${player.score || 0}\`)
+                  )
+                )
+            )
+          )
+        );
+      }
+
+      return null;
+    };
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(React.createElement(KabulGame));
+  </script>
+</body>
+</html>
