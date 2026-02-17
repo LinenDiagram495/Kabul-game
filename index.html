@@ -88,7 +88,7 @@
         const deck = [];
         for (const suit of SUITS) {
           for (const rank of RANKS) {
-            const cardId = rank === 'K' ? \`\${rank}\${suit}\` : \`\${rank}\${suit}\`;
+            const cardId = `${rank}${suit}`;
             const value = rank === 'K' ? (suit === '♥' || suit === '♦' ? -1 : 10) : CARD_VALUES[rank];
             deck.push({ id: cardId, rank, suit, value, faceUp: false });
           }
